@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <title>Add a vector tile source</title>
+    <meta property="og:description" content="Add a vector source to a map." />
+    <meta charset='utf-8'>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel='stylesheet' href='https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.css' />
+    <script src='https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.js'></script>
+    <script src="https://cdn.jsdelivr.net/npm/geotiff"></script>
+    <style>
+        body { margin: 0; padding: 0; }
+        html, body, #map { height: 100%; }
+
+        .map-overlay {
+            font: bold 12px/20px 'Helvetica Neue', Arial, Helvetica, sans-serif;
+            position: absolute;
+            width: 200px;
+            bottom: 20px;
+            left: 0px;
+            padding: 10px;
+        }
+
+        .map-overlay .map-overlay-inner {
+            background-color: #fff;
+            box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+            border-radius: 3px;
+            padding: 10px;
+            margin-bottom: 10px;
+        }
+
+        .map-overlay label {
+            display: block;
+            margin: 0 0 0px;
+            font-size: 12px;
+            top: 100px;
+            left: 10px;
+            display: block;
+            margin-bottom: 5px;
+        }
+
+        .map-overlay input {
+            background-color: transparent;
+            display: inline-block;
+            width: 100%;
+            position: relative;
+            margin: 0;
+            cursor: ew-resize;
+        }
+
+
+    </style>
+</head>
+<body>
+<div id="map"></div>
+
+<div class="map-overlay top">
+    <div class="map-overlay-inner">
+        <label>陰陽図画像 不透明度: <span id="ortho-slider-opacity-value">0%</span></label>
+        <input id="ortho-slider-opacity" type="range" min="0" max="100" step="1" value="100">
+    </div>
+</div>
+
+<script type="module">
+          // 'GeoTIFF'パッケージから 'fromUrl' と 'Pool' 関数をインポート
+          const { fromUrl, Pool } = GeoTIFF;
+
+// 'fast-png'パッケージから'encode'関数をインポート。これは画像データをPNG形式にエンコードするために使用。
+          import { encode as fastPngEncode } from 'https://cdn.jsdelivr.net/npm/fast-png@6.1.0/+esm';
+
+
+
+         // タイルのx/y/z座標をWebメルカトルの境界ボックスに変換する関数を定義
+         const merc = (x, y, z) => {
+            const GEO_R = 6378137;
+            const orgX = -1 * ((2 * GEO_R * Math.PI) / 2);
+            const orgY = (2 * GEO_R * Math.PI) / 2;
+            const unit = (2 * GEO_R * Math.PI) / Math.pow(2, z);
+            const minx = orgX + x * unit;
+            const maxx = orgX + (x + 1) * unit;
+            const miny = orgY - (y + 1) * unit;
+            const maxy = orgY - y * unit;
+            return [minx, miny, maxx, maxy];
+        };
+
+        // Cloud Optimized GeoTIFF(COG)ソースを生成する非同期関数を定義
+        const generateCogSource = async (url) => {
+            // GeoTIFFから指定されたURLの画像を読み込み
+            const tiff = await fromUrl(url);
+            const pool = new Pool();
+            maplibregl.addProtocol('cog', (params, callback) => {
+                const segments = params.url.split('/');
+                console.log('segments:' + segments);
+                // タイルインデックスの取得
+                const [z, x, y] = segments.slice(segments.length - 3).map(Number);
+                // webmercator-bboxを取得
+                const bbox = merc(x, y, z);
+                // 画像のサイズを指定
+                const size = 512;
+                // GeoTIFFから特定の境界ボックス(bbox)内のラスターデータを読み込み
+                tiff.readRasters({
+                    bbox,
+                    // samples: [0, 1, 2, 3], // 4つのバンド（赤、緑、青、アルファ）を取得する
+                    samples: [0, 1, 2], // 3つのバンド（赤、緑、青）を取得する
+                    width: size,  // 読み込む画像のサイズを指定
+                    height: size, // 読み込む画像のサイズを指定
+                    interleave: true, // バンドを交互に読み込む
+                    pool, // 並列処理のためのワーカープールを指定
+                }).then((data) => {
+                    // アルファチャンネルを追加する処理
+                    const expandedData = new Uint8ClampedArray(4 * size * size);
+                    for (let i = 0, j = 0; i < data.length; i += 3, j += 4) {
+                        expandedData[j] = data[i];     // R
+                        expandedData[j + 1] = data[i + 1]; // G
+                        expandedData[j + 2] = data[i + 2]; // B
+                        if (data[i] === 0 && data[i + 1] === 0 && data[i + 2] === 0) {
+                            expandedData[j + 3] = 0;  // A
+                        } else {
+                            expandedData[j + 3] = 255;  // A
+                        }
+                    }
+                    const img = new ImageData(expandedData, size, size);
+                    // imgデータをPNG形式にエンコード
+                    const png = fastPngEncode(img);
+                    callback(null, png, null, null);
+                });
+                return { cancel: () => { } };
+            });
+
+        
+            // RasterSourceSpecificationに対応するソースオブジェクトを生成
+            const source = {
+                type: 'raster',
+                tiles: [`cog://${url.split('://')[1]}/{z}/{x}/{y}`],
+                // tileSize: 256,
+                tileSize: 512,
+                minzoom: 1,
+                maxzoom: 23,
+                // attribution: '<a href="https://www.geospatial.jp/ckan/dataset/aac-2021710-atami-lp">G空間情報センター 2021年7月10日静岡県熱海市土石流災害航空レーザ計測データ他(CC By 4.0)</a>'
+                attribution: '<a href="https://www.geospatial.jp/ckan/dataset/shizuoka-2019-pointcloud">VIRTUAL SHIZUOKA 静岡県 富士山南東部・伊豆東部 点群データ（LPデータ オルソ画像データ）を加工して作成</a>'
+            };
+
+            return { source };
+        };
+
+
+   
+
+    const map = new maplibregl.Map({
+        container: 'map',
+        style:
+            'https://tile2.openstreetmap.jp/styles/osm-bright/style.json',
+        zoom: 5,
+        center: [140.084556, 36.104611],
+        minzoom: 2,
+            maxzoom: 12,
+            pitch: 0,
+            bearing: 0,
+            hash: true,
+            attributionControl: false
+    });
+
+    
+        // ズーム・回転
+        map.addControl(new maplibregl.NavigationControl());
+
+        // フルスクリーンモードのオンオフ
+        map.addControl(new maplibregl.FullscreenControl());
+
+        // 現在位置表示
+        map.addControl(new maplibregl.GeolocateControl({
+            positionOptions: {
+                enableHighAccuracy: false
+            },
+            fitBoundsOptions: { maxZoom: 18 },
+            trackUserLocation: true,
+            showUserLocation: true
+        }));
+
+        // スケール表示
+        map.addControl(new maplibregl.ScaleControl({
+            maxWidth: 200,
+            unit: 'metric'
+        }));
+
+        // Attributionを折りたたみ表示
+        map.addControl(new maplibregl.AttributionControl({
+            compact: false
+         //   customAttribution: '( <a href="https://github.com/shi-works/cog-on-maplibre-gl-js" target="_blank">Github</a>） '
+        }));
+
+            // マップのロードが完了したら、COGソースを生成しレイヤーに追加
+            map.on('load', async () => {
+            const { source } = await generateCogSource(
+                'https://inyouzu.s3.ap-northeast-1.amazonaws.com/asia/inyouzu_cog3857.tif?response-content-disposition=inline&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEJb%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaDmFwLW5vcnRoZWFzdC0xIkgwRgIhANYNrS0%2FaC0G6Zw4E0nbyDM0HRp2aGAA6OgrTeoZTgMhAiEA2tz%2FDpp3FnbtjMYFe5rL%2BZpwinPebq%2FhCjiN9m7ndl0qjgMI%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARAAGgw5NDYyNjE1MjU1MzgiDKN6RX6mNxVmSXJFiyriAuFYC%2BHZJ5ceUFzPVlM0bqQF7QRHRktDoG3oJY%2FJznov0OJcI58xt9aHgkrqVTXQcG9xsRIn4OFLnjoZ9AeonBknk1H%2BFPlzbvp7ohVZDLnoXQSfNr%2BKubBXyB3bQmS9BB4QogIGg3FWRSypGeEZEo8nYEhf371GIxH7HiT8kCguatJc0quqwsEwGb%2BloJl27CUzprzrasTUGlPVBF1VjUfpjpyC7uTTyftx%2FfpTtV3N%2BlC%2FoXgRvDA9tO%2Bitei2%2Bd7D55VX5mVe0n5jtJjnrJmdgOG8YBXjwLZEk8G8s4H4NqiHFvCy3b829ou48s4w5P%2FbRdwqHm9tnmpoxu9wcXe%2BzU%2FsdPFbzJn3oX07m9Nq1fGGR9Bit7uJk%2FHf%2FjUoUx71Ou7nrpSzROnmvaWc%2B4MRNSNPIQVMUQENN2XufZ1Is0vHXl%2Fn3fBRgcgac6i8AS0x%2BqUCqm7MyFf%2B5sL6ek89mDC6xNqrBjqyAmpAlnch1sxsQDRcKKj%2BawDVkRa%2BzbjWYHsSkr8x4U9e6tyo71B0GU%2B7gjkA3j4F0n6%2F18nB4D1IyXCQo%2FdhZfATLwY5OkeAkA%2FaBtdA2JGIZmi2TjnuajY4NWSRwckUx2FnM7XNymxzeBGQH7cEv33ljrv7hgLgHhGMz94iM3lEHwz4nyJCCNfh10AsWiglBymt93MFYFY7CWFEjvWwxHMDF8nLmkI0839V6tYtYgJVvWD9MbZNpyB75OtwV43IelpAB8lV9gu13MGYeiVuxY1%2ByJfjCUO4F3bx3hbp1VppfG7fbAc07VEgBubpLByRvHU2gFRmmYzPT%2Bf%2B3npFfnahLrh67ZeewyOjWiMAJc%2B3ip6bYEep0lwDI9QF0OASm4siTGyMLp4rG7s3sejAR877EA%3D%3D&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Date=20231211T055503Z&X-Amz-SignedHeaders=host&X-Amz-Expires=43200&X-Amz-Credential=ASIA5YUMVAQRMPTCD7OE%2F20231211%2Fap-northeast-1%2Fs3%2Faws4_request&X-Amz-Signature=b2d61c778e4b403b49d6106da742698b48a110b13ce203c5522aea915032f5e4'
+            );
+            map.addSource('cogSample', source);
+            map.addLayer({
+                id: 'cogLayer',
+                type: 'raster',
+                source: 'cogSample',
+            });
+
+        });
+
+</script>
+</body>
+</html>
